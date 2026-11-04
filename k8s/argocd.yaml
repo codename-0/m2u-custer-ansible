@@ -7,29 +7,47 @@
 
   tasks:
     - name: Create argocd namespace
-      shell: kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
-      register: ns
-      changed_when: "'created' in ns.stdout"
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: "argocd"
+        state: present
 
-    - name: Install ArgoCD
-      command: >
-        kubectl apply -n argocd --server-side --force-conflicts 
-        -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+    - name: Install ArgoCD from official manifests
+      kubernetes.core.k8s:
+        state: present
+        src: "https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml"
+        namespace: "argocd"
+        server_side_apply:
+          field_manager: ansible
+          force_conflicts: true
 
-    - name: Wait for argocd-server to be ready
-      command: kubectl rollout status deployment/argocd-server -n argocd --timeout=300s
-      changed_when: false
+    - name: Wait for argocd-server deployment to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: "argocd-server"
+        namespace: "argocd"
+      register: argocd_deployment
+      until: >
+        argocd_deployment.resources | length > 0
+        and (argocd_deployment.resources[0].status.readyReplicas | default(0)) > 0
+      retries: 30
+      delay: 10
 
-    - name: Apply root Application from the repo
-      command: >
-        kubectl apply -n argocd
-        -f https://raw.githubusercontent.com/codename-0/m2u-app-of-apps/HEAD/bootstrap.yaml
+    - name: Apply root Application (app-of-apps pattern) from repository
+      kubernetes.core.k8s:
+        state: present
+        src: "https://raw.githubusercontent.com/codename-0/m2u-app-of-apps/HEAD/bootstrap.yaml"
+        namespace: "argocd"
 
-    - name: Show root app status
-      command: kubectl get applications -n argocd
-      register: apps
-      changed_when: false
+    - name: Fetch list of ArgoCD applications for status check
+      kubernetes.core.k8s_info:
+        api_version: argoproj.io/v1alpha1
+        kind: Application
+        namespace: "argocd"
+      register: apps_info
 
-    - name: Print app status
-      debug:
-        var: apps.stdout_lines
+    - name: Print deployed applications summary
+      ansible.builtin.debug:
+        msg: "{{ apps_info.resources | map(attribute='metadata.name') | list }}"

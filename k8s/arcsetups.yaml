@@ -1,0 +1,57 @@
+---
+- name: Set up ARC cluster environment
+  hosts: control_plane
+  become: false
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
+  vars:
+    arc_node_name: "w0x01"
+
+  tasks:
+    - name: Apply taint for GitHub ARC runners natively
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Node
+        name: "{{ arc_node_name }}"
+        state: present
+        definition:
+          spec:
+            taints:
+              - effect: NoSchedule
+                key: dedicated
+                value: arc-runners
+
+    - name: Ensure namespace exists for ARC runners
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: "arc-runners"
+        state: present
+
+    - name: Create or update the GitHub credentials secret
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "controller-manager-github-secret"
+            namespace: "arc-runners"
+          type: Opaque
+          stringData:
+            github_app_id: "{{ lookup('env', 'GITHUB_APP_ID') }}"
+            github_app_installation_id: "{{ lookup('env', 'GITHUB_APP_INSTALLATION_ID') }}"
+            github_app_private_key: "{{ lookup('file', lookup('env', 'GITHUB_APP_PRIVATE_KEY_PATH')) }}"
+
+    - name: Verify secret creation
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: "controller-manager-github-secret"
+        namespace: "arc-runners"
+      register: secret_check
+
+    - name: Display verification status
+      ansible.builtin.debug:
+        msg: "Secret successfully configured in namespace 'arc-runners'."
+      when: secret_check.resources | length > 0

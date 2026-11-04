@@ -6,11 +6,14 @@ all:
       children:
         control_plane:
           hosts:
-            cp1:
+            cp0x00:
               ansible_host: 192.168.1.15
               ansible_user: verbena
         workers:
           hosts:
-            w1:
+            w0x00:
               ansible_host: 192.168.1.16
               ansible_user: orchid
+            w0x01:
+              ansible_host: 192.168.1.4
+              ansible_user: lavender
