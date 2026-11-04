@@ -1,0 +1,16 @@
+all:
+  children:
+    k8s:
+      vars:
+        ansible_python_interpreter: /usr/bin/python3
+      children:
+        control_plane:
+          hosts:
+            cp1:
+              ansible_host: 192.168.1.15
+              ansible_user: verbena
+        workers:
+          hosts:
+            w1:
+              ansible_host: 192.168.1.16
+              ansible_user: orchid

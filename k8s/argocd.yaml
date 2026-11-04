@@ -1,0 +1,35 @@
+---
+- name: Install ArgoCD and bootstrap app-of-apps
+  hosts: control_plane
+  become: false
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
+
+  tasks:
+    - name: Create argocd namespace
+      shell: kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+      register: ns
+      changed_when: "'created' in ns.stdout"
+
+    - name: Install ArgoCD
+      command: >
+        kubectl apply -n argocd --server-side --force-conflicts 
+        -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+    - name: Wait for argocd-server to be ready
+      command: kubectl rollout status deployment/argocd-server -n argocd --timeout=300s
+      changed_when: false
+
+    - name: Apply root Application from the repo
+      command: >
+        kubectl apply -n argocd
+        -f https://raw.githubusercontent.com/codename-0/m2u-app-of-apps/HEAD/bootstrap.yaml
+
+    - name: Show root app status
+      command: kubectl get applications -n argocd
+      register: apps
+      changed_when: false
+
+    - name: Print app status
+      debug:
+        var: apps.stdout_lines
