@@ -1,0 +1,102 @@
+---
+# ---------- Play 1: on the k3s server ----------
+- name: Create argocd-manager on Lighthouse and read its token
+  hosts: lighthouse
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Apply ServiceAccount, ClusterRoleBinding, token Secret
+      command: k3s kubectl apply -f -
+      args:
+        stdin: |
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: argocd-manager
+            namespace: kube-system
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: argocd-manager
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: cluster-admin
+          subjects:
+            - kind: ServiceAccount
+              name: argocd-manager
+              namespace: kube-system
+          ---
+          apiVersion: v1
+          kind: Secret
+          type: kubernetes.io/service-account-token
+          metadata:
+            name: argocd-manager-token
+            namespace: kube-system
+            annotations:
+              kubernetes.io/service-account.name: argocd-manager
+      register: apply_out
+      changed_when: "'created' in apply_out.stdout or 'configured' in apply_out.stdout"
+
+    - name: Read token (base64)
+      command:
+        argv: [k3s, kubectl, -n, kube-system, get, secret, argocd-manager-token, -o, "jsonpath={.data.token}"]
+      register: tok
+      until: tok.stdout | length > 0
+      retries: 10
+      delay: 3
+      changed_when: false
+      no_log: true
+
+    - name: Read CA (base64)
+      command:
+        argv: [k3s, kubectl, -n, kube-system, get, secret, argocd-manager-token, -o, 'jsonpath={.data.ca\.crt}']
+      register: ca
+      changed_when: false
+      no_log: true
+
+    - name: Keep values in memory for the next play
+      set_fact:
+        sa_token: "{{ tok.stdout | b64decode }}"
+        sa_ca_b64: "{{ ca.stdout }}"
+      no_log: true
+
+# ---------- Play 2: on the Argo CD control plane ----------
+- name: Register Lighthouse in Argo CD
+  hosts: control_plane
+  run_once: true
+  become: false                 # verbena's own kubectl/kubeconfig
+  gather_facts: false
+  vars:
+    lh: "{{ groups['lighthouse'][0] }}"
+    cluster_name: lighthouse
+    cluster_server: "https://{{ hostvars[lh].k3s_tls_san | default(hostvars[lh].ansible_host) }}:6443"
+    argocd_namespace: argocd
+    cluster_config:
+      bearerToken: "{{ hostvars[lh].sa_token }}"
+      tlsClientConfig:
+        insecure: false
+        caData: "{{ hostvars[lh].sa_ca_b64 }}"
+  tasks:
+    - name: Apply cluster Secret
+      command: kubectl apply -f -
+      args:
+        stdin: "{{ secret_manifest | to_json }}"
+      vars:
+        secret_manifest:
+          apiVersion: v1
+          kind: Secret
+          type: Opaque
+          metadata:
+            name: "cluster-{{ cluster_name }}"
+            namespace: "{{ argocd_namespace }}"
+            labels:
+              argocd.argoproj.io/secret-type: cluster
+          data:
+            name: "{{ cluster_name | b64encode }}"
+            server: "{{ cluster_server | b64encode }}"
+            config: "{{ cluster_config | to_json | b64encode }}"
+      register: argo_out
+      changed_when: "'created' in argo_out.stdout or 'configured' in argo_out.stdout"
+      no_log: true

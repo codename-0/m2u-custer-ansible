@@ -1,0 +1,17 @@
+all:
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  children:
+    k8s:
+      children:
+        control_plane:
+          hosts:
+            argocd-cp:
+              ansible_host: 192.168.1.15
+              ansible_user: verbena
+    lighthouse:
+      hosts:
+        lighthouse0x00:
+          ansible_host: 10.11.0.5
+          ansible_user: ubuntu
+          k3s_tls_san: 10.11.0.5

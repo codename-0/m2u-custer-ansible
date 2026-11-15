@@ -1,0 +1,109 @@
+---
+- name: Install and enrol Cloudflare One Client on cluster nodes
+  hosts: k8s
+  become: true
+  vars:
+    warp_team: "{{ lookup('env', 'WARP_TEAM') }}"
+    warp_client_id: "{{ lookup('env', 'WARP_CLIENT_ID_' ~ (inventory_hostname | upper)) }}"
+    warp_client_secret: "{{ lookup('env', 'WARP_CLIENT_SECRET_' ~ (inventory_hostname | upper)) }}"
+
+  tasks:
+    - name: Check WARP variables are set in the environment
+      assert:
+        that:
+          - warp_team | length > 0
+          - warp_client_id | length > 0
+          - warp_client_secret | length > 0
+        fail_msg: >-
+          Missing env vars for {{ inventory_hostname }}. Need WARP_TEAM,
+          WARP_CLIENT_ID_{{ inventory_hostname | upper }} and
+          WARP_CLIENT_SECRET_{{ inventory_hostname | upper }}.
+          Load them with: set -a; source .env; set +a
+
+    - name: Download Cloudflare WARP apt key
+      get_url:
+        url: https://pkg.cloudflareclient.com/pubkey.gpg
+        dest: /usr/share/keyrings/cloudflare-warp.asc
+        mode: "0644"
+
+    - name: Add Cloudflare WARP apt repository
+      apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/cloudflare-warp.asc] https://pkg.cloudflareclient.com/ {{ ansible_distribution_release }} main"
+        filename: cloudflare-client
+
+    - name: Install cloudflare-warp
+      apt:
+        name: cloudflare-warp
+        update_cache: true
+
+    - name: Create WARP config directory
+      file:
+        path: /var/lib/cloudflare-warp
+        state: directory
+        mode: "0755"
+
+    - name: Write MDM file for service-token enrolment
+      copy:
+        dest: /var/lib/cloudflare-warp/mdm.xml
+        mode: "0600"
+        content: |
+          <dict>
+            <key>organization</key>
+            <string>{{ warp_team }}</string>
+            <key>auth_client_id</key>
+            <string>{{ warp_client_id }}</string>
+            <key>auth_client_secret</key>
+            <string>{{ warp_client_secret }}</string>
+          </dict>
+      no_log: true
+      notify: restart warp-svc
+
+    - name: Enable and start warp-svc
+      systemd:
+        name: warp-svc
+        enabled: true
+        state: started
+
+    - name: Check current WARP registration status
+      command: warp-cli --accept-tos status
+      register: warp_pre
+      changed_when: false
+      failed_when: false
+
+    - name: Stop warp-svc before clearing stale or mismatched registration
+      systemd:
+        name: warp-svc
+        state: stopped
+      when: "'RegistrationMissing' in warp_pre.stdout or 'Registration Missing' in warp_pre.stdout or 'ApiMismatch' in warp_pre.stdout"
+
+    - name: Remove stale registration database files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/cloudflare-warp/reg.json
+        - /var/lib/cloudflare-warp/warp.db
+      when: "'RegistrationMissing' in warp_pre.stdout or 'Registration Missing' in warp_pre.stdout or 'ApiMismatch' in warp_pre.stdout"
+      notify: restart warp-svc
+
+    - name: Flush handlers so the MDM file is picked up and service restarts
+      meta: flush_handlers
+
+    - name: Ensure WARP is connected
+      command: warp-cli --accept-tos connect
+      changed_when: false
+      failed_when: false
+
+    - name: Wait until WARP is connected
+      command: warp-cli --accept-tos status
+      register: warp_status
+      until: "'Connected' in warp_status.stdout and 'Disconnected' not in warp_status.stdout"
+      retries: 12
+      delay: 5
+      changed_when: false
+
+  handlers:
+    - name: restart warp-svc
+      systemd:
+        name: warp-svc
+        state: restarted

@@ -1,0 +1,77 @@
+---
+- name: Install k3s on Lighthouse
+  hosts: lighthouse
+  become: true
+  vars:
+    k3s_version: "v1.37.2+k3s1"    # empty = stable channel, or pin e.g. "v1.34.1+k3s1"
+    k3s_san: "{{ k3s_tls_san | default(ansible_host) }}"
+    k3s_disable:
+      - traefik
+    k3s_pod_cidr: "10.245.0.0/16"
+    k3s_service_cidr: "10.246.0.0/16"
+
+  tasks:
+    - name: Install prerequisites
+      apt:
+        name:
+          - curl
+          - ca-certificates
+        update_cache: true
+
+    - name: Create k3s config directory
+      file:
+        path: /etc/rancher/k3s
+        state: directory
+        mode: "0755"
+
+    - name: Write k3s config
+      copy:
+        dest: /etc/rancher/k3s/config.yaml
+        mode: "0600"
+        content: |
+          write-kubeconfig-mode: "0600"
+          tls-san:
+            - "{{ k3s_san }}"
+          cluster-cidr: "{{ k3s_pod_cidr }}"
+          service-cidr: "{{ k3s_service_cidr }}"
+          {% if k3s_disable | length > 0 %}
+          disable:
+          {% for item in k3s_disable %}
+            - {{ item }}
+          {% endfor %}
+          {% endif %}
+      notify: restart k3s
+
+    - name: Download k3s install script
+      get_url:
+        url: https://get.k3s.io
+        dest: /usr/local/bin/k3s-install.sh
+        mode: "0755"
+
+    - name: Install k3s
+      command: /usr/local/bin/k3s-install.sh
+      environment: "{{ {'INSTALL_K3S_VERSION': k3s_version} if k3s_version | length > 0 else {} }}"
+      args:
+        creates: /usr/local/bin/k3s
+
+    - name: Enable and start k3s
+      systemd:
+        name: k3s
+        enabled: true
+        state: started
+
+    - meta: flush_handlers
+
+    - name: Wait for node to be Ready
+      command: k3s kubectl get nodes --no-headers
+      register: nodes
+      until: nodes.stdout is regex(' Ready(\s|,|$)')
+      retries: 30
+      delay: 5
+      changed_when: false
+
+  handlers:
+    - name: restart k3s
+      systemd:
+        name: k3s
+        state: restarted
