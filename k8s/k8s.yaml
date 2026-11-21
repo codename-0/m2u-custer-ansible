@@ -6,10 +6,46 @@
     k8s_minor: "v1.37"
 
   tasks:
+    - name: Ensure systemd-timesyncd is enabled and started
+      systemd:
+        name: systemd-timesyncd
+        enabled: true
+        state: started
+
+    - name: Wait for system clock to synchronize
+      shell: |
+        timedatectl set-ntp true
+        for i in $(seq 1 15); do
+          if timedatectl show -p NTPSynchronized --value | grep -q yes; then
+            exit 0
+          fi
+          sleep 2
+        done
+        exit 1
+      changed_when: false
+
+    - name: Sync clock via chrony or HTTPS Date fallback if skewed
+      shell: |
+        REMOTE_EPOCH=$(date -u -d "$(curl -sI --max-time 5 https://archive.ubuntu.com | awk -F': ' 'tolower($1)=="date" {print $2; exit}' | tr -d '\r')" +%s 2>/dev/null || true)
+        LOCAL_EPOCH=$(date -u +%s)
+        if [ -n "$REMOTE_EPOCH" ]; then
+          DIFF=$(( REMOTE_EPOCH - LOCAL_EPOCH ))
+          ABS_DIFF=${DIFF#-}
+          if [ "$ABS_DIFF" -gt 300 ]; then
+            date -u -s "@$REMOTE_EPOCH"
+          fi
+        fi
+      changed_when: false
+
     - name: Disable swap now
       command: swapoff -a
       when: ansible_swaptotal_mb > 0
       changed_when: true
+
+    - name: Remove swap file
+      file:
+        path: /swap.img
+        state: absent
 
     - name: Disable swap permanently in fstab
       replace:

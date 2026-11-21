@@ -1,7 +1,7 @@
 ---
 # ---------- Play 1: on the k3s server ----------
-- name: Create argocd-manager on Lighthouse and read its token
-  hosts: lighthouse
+- name: Create argocd-manager on k3s server and read its token
+  hosts: k3s_control_plane
   become: true
   gather_facts: false
   tasks:
@@ -63,27 +63,28 @@
       no_log: true
 
 # ---------- Play 2: on the Argo CD control plane ----------
-- name: Register Lighthouse in Argo CD
-  hosts: control_plane
+- name: Register k3s cluster in Argo CD
+  hosts: k8s
   run_once: true
-  become: false                 # verbena's own kubectl/kubeconfig
+  become: false
   gather_facts: false
   vars:
-    lh: "{{ groups['lighthouse'][0] }}"
-    cluster_name: lighthouse
-    cluster_server: "https://{{ hostvars[lh].k3s_tls_san | default(hostvars[lh].ansible_host) }}:6443"
     argocd_namespace: argocd
-    cluster_config:
-      bearerToken: "{{ hostvars[lh].sa_token }}"
-      tlsClientConfig:
-        insecure: false
-        caData: "{{ hostvars[lh].sa_ca_b64 }}"
   tasks:
-    - name: Apply cluster Secret
+    - name: Apply cluster Secret per k3s control plane
       command: kubectl apply -f -
       args:
         stdin: "{{ secret_manifest | to_json }}"
+      loop: "{{ groups['k3s_control_plane'] }}"
       vars:
+        k3s_host: "{{ item }}"
+        cluster_name: "{{ hostvars[k3s_host].argocd_cluster_name | default(k3s_host) }}"
+        cluster_server: "https://{{ hostvars[k3s_host].k3s_tls_san | default(hostvars[k3s_host].ansible_host) }}:6443"
+        cluster_config:
+          bearerToken: "{{ hostvars[k3s_host].sa_token }}"
+          tlsClientConfig:
+            insecure: false
+            caData: "{{ hostvars[k3s_host].sa_ca_b64 }}"
         secret_manifest:
           apiVersion: v1
           kind: Secret

@@ -102,7 +102,6 @@
       delay: 5
       changed_when: false
 
-  handlers:
     - name: restart warp-svc
       systemd:
         name: warp-svc

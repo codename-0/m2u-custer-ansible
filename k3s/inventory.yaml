@@ -9,9 +9,22 @@ all:
             argocd-cp:
               ansible_host: 192.168.1.15
               ansible_user: verbena
-    lighthouse:
-      hosts:
-        lighthouse0x00:
-          ansible_host: 10.11.0.5
-          ansible_user: ubuntu
-          k3s_tls_san: 10.11.0.5
+    k3s:
+      children:
+        k3s_control_plane:
+          hosts:
+            lighthouse0x01:
+              ansible_host: 10.11.4.12
+              ansible_user: ubuntu
+              k3s_tls_san: 10.11.4.12
+              argocd_cluster_name: lighthouse-v2
+        k3s_workers:
+          hosts:
+            lighthouse0x00:
+              ansible_host: 10.11.0.5
+              ansible_user: ubuntu
+              k3s_tls_san: 10.11.0.5
+            lighthouse0x02:
+              ansible_host: 10.11.0.9
+              ansible_user: ubuntu
+              k3s_tls_san: 10.11.0.9

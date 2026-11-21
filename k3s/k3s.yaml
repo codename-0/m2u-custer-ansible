@@ -1,9 +1,21 @@
 ---
-- name: Install k3s on Lighthouse
-  hosts: lighthouse
+- name: Reset workers that still have a standalone k3s server (opt-in)
+  hosts: k3s_workers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Uninstall old k3s server (wipes that node's local cluster data)
+      command: /usr/local/bin/k3s-uninstall.sh
+      args:
+        removes: /usr/local/bin/k3s-uninstall.sh
+      when: reset_workers | default(false) | bool
+
+
+- name: Install k3s server on control plane
+  hosts: k3s_control_plane
   become: true
   vars:
-    k3s_version: "v1.37.2+k3s1"    # empty = stable channel, or pin e.g. "v1.34.1+k3s1"
+    k3s_version: "v1.37.2+k3s1"    # empty = stable channel
     k3s_san: "{{ k3s_tls_san | default(ansible_host) }}"
     k3s_disable:
       - traefik
@@ -24,12 +36,13 @@
         state: directory
         mode: "0755"
 
-    - name: Write k3s config
+    - name: Write k3s server config
       copy:
         dest: /etc/rancher/k3s/config.yaml
         mode: "0600"
         content: |
           write-kubeconfig-mode: "0600"
+          node-name: "{{ inventory_hostname }}"
           tls-san:
             - "{{ k3s_san }}"
           cluster-cidr: "{{ k3s_pod_cidr }}"
@@ -48,8 +61,8 @@
         dest: /usr/local/bin/k3s-install.sh
         mode: "0755"
 
-    - name: Install k3s
-      command: /usr/local/bin/k3s-install.sh
+    - name: Install k3s server
+      command: /usr/local/bin/k3s-install.sh server
       environment: "{{ {'INSTALL_K3S_VERSION': k3s_version} if k3s_version | length > 0 else {} }}"
       args:
         creates: /usr/local/bin/k3s
@@ -62,16 +75,124 @@
 
     - meta: flush_handlers
 
-    - name: Wait for node to be Ready
+    - name: Wait for server node to be Ready
       command: k3s kubectl get nodes --no-headers
       register: nodes
-      until: nodes.stdout is regex(' Ready(\s|,|$)')
+      until: >
+        nodes.stdout_lines
+        | select('match', '^' ~ inventory_hostname ~ '\s+Ready(\s|$)')
+        | list | length > 0
       retries: 30
       delay: 5
       changed_when: false
+
+    - name: Read join token
+      slurp:
+        src: /var/lib/rancher/k3s/server/node-token
+      register: k3s_node_token
+      no_log: true
+
+    - name: Expose join token to the agent play
+      set_fact:
+        k3s_join_token: "{{ k3s_node_token.content | b64decode | trim }}"
+        k3s_join_url: "https://{{ ansible_host }}:6443"
+      no_log: true
 
   handlers:
     - name: restart k3s
       systemd:
         name: k3s
         state: restarted
+
+
+- name: Join k3s agents to the control plane
+  hosts: k3s_workers
+  become: true
+  vars:
+    k3s_version: "v1.37.2+k3s1"
+    k3s_server: "{{ groups['k3s_control_plane'] | first }}"
+
+  tasks:
+    - name: Refuse to continue if a k3s server is still installed here
+      stat:
+        path: /etc/systemd/system/k3s.service
+      register: old_server
+
+    - name: Fail with instructions
+      fail:
+        msg: "{{ inventory_hostname }} still has a k3s server. Re-run with -e reset_workers=true to wipe it."
+      when: old_server.stat.exists
+
+    - name: Install prerequisites
+      apt:
+        name:
+          - curl
+          - ca-certificates
+        update_cache: true
+
+    - name: Create k3s config directory
+      file:
+        path: /etc/rancher/k3s
+        state: directory
+        mode: "0755"
+
+    - name: Write k3s agent config
+      copy:
+        dest: /etc/rancher/k3s/config.yaml
+        mode: "0600"
+        content: |
+          server: "{{ hostvars[k3s_server].k3s_join_url }}"
+          token: "{{ hostvars[k3s_server].k3s_join_token }}"
+          node-name: "{{ inventory_hostname }}"
+          node-ip: "{{ ansible_host }}"
+      no_log: true
+      notify: restart k3s-agent
+
+    - name: Download k3s install script
+      get_url:
+        url: https://get.k3s.io
+        dest: /usr/local/bin/k3s-install.sh
+        mode: "0755"
+
+    - name: Install k3s agent
+      command: /usr/local/bin/k3s-install.sh agent
+      environment: "{{ {'INSTALL_K3S_VERSION': k3s_version} if k3s_version | length > 0 else {} }}"
+      args:
+        creates: /usr/local/bin/k3s
+
+    - name: Enable and start k3s-agent
+      systemd:
+        name: k3s-agent
+        enabled: true
+        state: started
+
+    - meta: flush_handlers
+
+  handlers:
+    - name: restart k3s-agent
+      systemd:
+        name: k3s-agent
+        state: restarted
+
+
+- name: Verify all nodes joined
+  hosts: k3s_control_plane
+  become: true
+  tasks:
+    - name: Wait for all nodes to be Ready
+      command: k3s kubectl get nodes --no-headers
+      register: nodes
+      until: >
+        (nodes.stdout_lines | length) == (groups['k3s'] | length)
+        and (nodes.stdout_lines | select('search', ' Ready(\s|,|$)') | list | length)
+            == (groups['k3s'] | length)
+      retries: 30
+      delay: 5
+      changed_when: false
+
+    - name: Label workers
+      command: >
+        k3s kubectl label node {{ item }}
+        node-role.kubernetes.io/worker=worker --overwrite
+      loop: "{{ groups['k3s_workers'] }}"
+      changed_when: false

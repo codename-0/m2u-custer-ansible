@@ -35,6 +35,19 @@
       retries: 30
       delay: 10
 
+    - name: Scale down unused ArgoCD deployments to save memory
+      kubernetes.core.k8s:
+        api_version: apps/v1
+        kind: Deployment
+        name: "{{ item }}"
+        namespace: "argocd"
+        definition:
+          spec:
+            replicas: 0
+      loop:
+        - argocd-dex-server
+        - argocd-notifications-controller
+
     - name: Apply root Application (app-of-apps pattern) from repository
       kubernetes.core.k8s:
         state: present
